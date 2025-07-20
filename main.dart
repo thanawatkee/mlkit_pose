@@ -1,8 +1,8 @@
 import 'dart:async';
-import 'dart:math';
 import 'dart:typed_data';
-import 'package:camera/camera.dart';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -35,15 +35,9 @@ class PoseDetectionScreen extends StatefulWidget {
 
 class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
   late CameraController _cameraController;
-  late PoseDetector _poseDetector;
   bool _isProcessing = false;
+  late PoseDetector _poseDetector;
   List<Pose> _poses = [];
-
-  Timer? _sitTimer;
-  bool _isSitting = false;
-  bool _sitConfirmed = false;
-
-  String _currentPoseLabel = 'ไม่ทราบท่าทาง';
 
   @override
   void initState() {
@@ -55,9 +49,13 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
     await Permission.camera.request();
     if (await Permission.camera.isGranted) {
       _poseDetector = PoseDetector(
-        options: PoseDetectorOptions(mode: PoseDetectionMode.stream),
+        options: PoseDetectorOptions(
+          mode: PoseDetectionMode.stream,
+        ),
       );
       _startCamera();
+    } else {
+      print("Camera permission denied.");
     }
   }
 
@@ -73,15 +71,16 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
 
       _cameraController.startImageStream((CameraImage image) {
         if (_isProcessing) return;
+
         _isProcessing = true;
-        _processImage(image);
+        _processCameraImage(image);
       });
 
       setState(() {});
     });
   }
 
-  Future<void> _processImage(CameraImage image) async {
+  Future<void> _processCameraImage(CameraImage image) async {
     try {
       final WriteBuffer allBytes = WriteBuffer();
       for (final Plane plane in image.planes) {
@@ -90,122 +89,54 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
       final bytes = allBytes.done().buffer.asUint8List();
 
       final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
+
       final camera = cameras.first;
-      final rotation = InputImageRotationValue.fromRawValue(camera.sensorOrientation) ??
-          InputImageRotation.rotation0deg;
-      final format = InputImageFormatValue.fromRawValue(image.format.raw) ??
-          InputImageFormat.nv21;
+      final imageRotation =
+          InputImageRotationValue.fromRawValue(camera.sensorOrientation) ??
+              InputImageRotation.rotation0deg;
+
+      final inputImageFormat =
+          InputImageFormatValue.fromRawValue(image.format.raw) ??
+              InputImageFormat.nv21;
 
       final planeData = image.planes.map(
-        (Plane plane) => InputImagePlaneMetadata(
-          bytesPerRow: plane.bytesPerRow,
-          height: plane.height,
-          width: plane.width,
-        ),
+        (Plane plane) {
+          return InputImagePlaneMetadata(
+            bytesPerRow: plane.bytesPerRow,
+            height: plane.height,
+            width: plane.width,
+          );
+        },
       ).toList();
+
+      final inputImageData = InputImageData(
+        size: imageSize,
+        imageRotation: imageRotation,
+        inputImageFormat: inputImageFormat,
+        planeData: planeData,
+      );
 
       final inputImage = InputImage.fromBytes(
         bytes: bytes,
-        inputImageData: InputImageData(
-          size: imageSize,
-          imageRotation: rotation,
-          inputImageFormat: format,
-          planeData: planeData,
-        ),
+        inputImageData: inputImageData,
       );
 
       final poses = await _poseDetector.processImage(inputImage);
 
-      if (poses.isNotEmpty) {
-        final pose = poses.first;
-        final poseLabel = _classifyPose(pose);
-
-        if (_checkIfSitting(pose)) {
-          if (!_isSitting) {
-            _isSitting = true;
-            _sitTimer?.cancel();
-            _sitTimer = Timer(const Duration(seconds: 5), () {
-              setState(() {
-                _sitConfirmed = true;
-              });
-            });
-          }
-        } else {
-          _isSitting = false;
-          _sitTimer?.cancel();
-          _sitConfirmed = false;
-        }
-
-        setState(() {
-          _poses = poses;
-          _currentPoseLabel = poseLabel;
-        });
-      } else {
-        _isSitting = false;
-        _sitTimer?.cancel();
-        _sitConfirmed = false;
-        setState(() {
-          _poses = [];
-          _currentPoseLabel = 'ไม่พบผู้ใช้';
-        });
-      }
+      setState(() {
+        _poses = poses;
+      });
     } catch (e) {
-      print("Error processing image: $e");
+      print('Error detecting pose: $e');
     } finally {
       _isProcessing = false;
     }
-  }
-
-  bool _checkIfSitting(Pose pose) {
-    final hip = pose.landmarks[PoseLandmarkType.leftHip];
-    final knee = pose.landmarks[PoseLandmarkType.leftKnee];
-    final ankle = pose.landmarks[PoseLandmarkType.leftAnkle];
-
-    if (hip == null || knee == null || ankle == null) return false;
-
-    final angle = _calculateAngle(hip, knee, ankle);
-    return angle > 70 && angle < 110;
-  }
-
-  String _classifyPose(Pose pose) {
-    final hip = pose.landmarks[PoseLandmarkType.leftHip];
-    final knee = pose.landmarks[PoseLandmarkType.leftKnee];
-    final ankle = pose.landmarks[PoseLandmarkType.leftAnkle];
-
-    final shoulder = pose.landmarks[PoseLandmarkType.leftShoulder];
-    final wrist = pose.landmarks[PoseLandmarkType.leftWrist];
-    final elbow = pose.landmarks[PoseLandmarkType.leftElbow];
-
-    if (hip == null || knee == null || ankle == null) return 'ไม่ทราบท่าทาง';
-
-    final kneeAngle = _calculateAngle(hip, knee, ankle);
-
-    if (kneeAngle > 70 && kneeAngle < 110) return 'นั่ง';
-    if (kneeAngle > 160) return 'ยืน';
-    if (wrist != null && shoulder != null && wrist.y < shoulder.y) return 'ยกมือ';
-
-    return 'ไม่ทราบท่าทาง';
-  }
-
-  double _calculateAngle(PoseLandmark a, PoseLandmark b, PoseLandmark c) {
-    final baX = a.x - b.x;
-    final baY = a.y - b.y;
-    final bcX = c.x - b.x;
-    final bcY = c.y - b.y;
-
-    final dot = baX * bcX + baY * bcY;
-    final magnitudeBA = sqrt(baX * baX + baY * baY);
-    final magnitudeBC = sqrt(bcX * bcX + bcY * bcY);
-
-    final angleRad = acos(dot / (magnitudeBA * magnitudeBC + 1e-6));
-    return angleRad * (180 / pi);
   }
 
   @override
   void dispose() {
     _cameraController.dispose();
     _poseDetector.close();
-    _sitTimer?.cancel();
     super.dispose();
   }
 
@@ -223,35 +154,8 @@ class _PoseDetectionScreenState extends State<PoseDetectionScreen> {
           CameraPreview(_cameraController),
           CustomPaint(
             painter: PosePainter(_poses, _cameraController.value.previewSize!),
+            child: Container(),
           ),
-          Positioned(
-            top: 20,
-            left: 20,
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.6),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                'ท่าปัจจุบัน: $_currentPoseLabel',
-                style: const TextStyle(color: Colors.white, fontSize: 18),
-              ),
-            ),
-          ),
-          if (_sitConfirmed)
-            Positioned(
-              top: 60,
-              left: 20,
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                color: Colors.green.withOpacity(0.8),
-                child: const Text(
-                  '✅ ตรวจสอบแล้ว: นั่งครบ 5 วินาที',
-                  style: TextStyle(color: Colors.white, fontSize: 18),
-                ),
-              ),
-            ),
         ],
       ),
     );
@@ -266,20 +170,50 @@ class PosePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final scaleX = size.width / imageSize.height;
-    final scaleY = size.height / imageSize.width;
+    final double scaleX = size.width / imageSize.height;
+    final double scaleY = size.height / imageSize.width;
 
-    final paint = Paint()
-      ..color = Colors.red
+    final Paint paint = Paint()
+      ..color = Colors.green
       ..strokeWidth = 4.0
-      ..style = PaintingStyle.fill;
+      ..style = PaintingStyle.stroke;
 
     for (final pose in poses) {
-      for (final point in pose.landmarks.values) {
-        final x = size.width - (point.x * scaleX);
-        final y = point.y * scaleY;
-        canvas.drawCircle(Offset(x, y), 5, paint);
+      for (final landmark in PoseLandmarkType.values) {
+        final PoseLandmark? point = pose.landmarks[landmark];
+        if (point != null) {
+          final x = size.width - (point.x * scaleX);
+          final y = point.y * scaleY;
+          canvas.drawCircle(Offset(x, y), 4, paint);
+        }
       }
+
+      // Optional: draw lines between common joint pairs
+      void drawLine(PoseLandmarkType type1, PoseLandmarkType type2) {
+        final p1 = pose.landmarks[type1];
+        final p2 = pose.landmarks[type2];
+        if (p1 != null && p2 != null) {
+          final x1 = size.width - (p1.x * scaleX);
+          final y1 = p1.y * scaleY;
+          final x2 = size.width - (p2.x * scaleX);
+          final y2 = p2.y * scaleY;
+          canvas.drawLine(Offset(x1, y1), Offset(x2, y2), paint);
+        }
+      }
+
+      // Connect some key joints
+      drawLine(PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder);
+      drawLine(PoseLandmarkType.leftShoulder, PoseLandmarkType.leftElbow);
+      drawLine(PoseLandmarkType.leftElbow, PoseLandmarkType.leftWrist);
+      drawLine(PoseLandmarkType.rightShoulder, PoseLandmarkType.rightElbow);
+      drawLine(PoseLandmarkType.rightElbow, PoseLandmarkType.rightWrist);
+      drawLine(PoseLandmarkType.leftShoulder, PoseLandmarkType.leftHip);
+      drawLine(PoseLandmarkType.rightShoulder, PoseLandmarkType.rightHip);
+      drawLine(PoseLandmarkType.leftHip, PoseLandmarkType.rightHip);
+      drawLine(PoseLandmarkType.leftHip, PoseLandmarkType.leftKnee);
+      drawLine(PoseLandmarkType.leftKnee, PoseLandmarkType.leftAnkle);
+      drawLine(PoseLandmarkType.rightHip, PoseLandmarkType.rightKnee);
+      drawLine(PoseLandmarkType.rightKnee, PoseLandmarkType.rightAnkle);
     }
   }
 
